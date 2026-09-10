@@ -1,0 +1,52 @@
+version: '3.8'
+
+services:
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+      target: dev
+    container_name: ajax-servlet-backend
+    ports:
+      - "8080:8080"
+    volumes:
+      - ./backend:/app
+      - maven-repo:/root/.m2
+    environment:
+      - JAVA_OPTS=-Xmx1024m -Xms512m
+    deploy:
+      resources:
+        limits:
+          memory: 1.5G
+    networks:
+      - app-network
+
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+      target: dev
+    container_name: ajax-servlet-frontend
+    ports:
+      - "3000:3000"
+    volumes:
+      - ./frontend:/app
+      - /app/node_modules
+    environment:
+      - CHOKIDAR_USEPOLLING=true
+      - WATCHPACK_POLLING=true
+    deploy:
+      resources:
+        limits:
+          memory: 2G
+    depends_on:
+      - backend
+    networks:
+      - app-network
+
+networks:
+  app-network:
+    driver: bridge
+
+volumes:
+  maven-repo:
