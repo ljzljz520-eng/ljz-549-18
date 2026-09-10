@@ -1,9 +1,9 @@
-import React, { useState, useEffect } from 'react';
-import { ajaxRequest } from './utils/ajax';
+import React, { useState, useEffect, useRef } from 'react';
+import { ajaxRequest, AjaxErrorType } from './utils/ajax';
 import Toast from './components/Toast';
 import CodeBlock from './components/CodeBlock';
 import { JAVA_SOURCE_CODE } from './constants/sourceCode';
-import { AlignLeft, Code, Database, Globe, Play, Server, Plus, Trash2, Clock, Settings, Zap } from 'lucide-react';
+import { AlignLeft, Code, Database, Globe, Play, Server, Plus, Trash2, Clock, Settings, Zap, XCircle } from 'lucide-react';
 
 function App() {
     const [loading, setLoading] = useState(false);
@@ -18,6 +18,9 @@ function App() {
     const [timeout, setTimeoutVal] = useState(5000);
 
     const [toast, setToast] = useState({ message: '', type: 'info' });
+
+    // 当前请求的句柄（用于取消）
+    const requestRef = useRef(null);
 
     // Generated JS Code
     const [frontendCode, setFrontendCode] = useState('');
@@ -75,48 +78,44 @@ function App() {
     };
 
     useEffect(() => {
-        // Robust Fetch Code Generation
+        // Unified ajaxRequest Usage Code Generation
         const headerObjStr = headers.reduce((acc, h) => {
             if (h.key) acc += `    "${h.key}": "${h.value}",\n`;
             return acc;
         }, '').trim();
 
-        const code = `// 健壮的 Fetch 请求（包含超时与错误处理）
-const url = "${url}";
-const timeout = ${timeout};
-const controller = new AbortController();
-const id = setTimeout(() => controller.abort(), timeout);
+        const code = `import { ajaxRequest } from './utils/ajax';
 
-const options = {
+// 统一封装的请求：现代浏览器走 fetch，老浏览器自动降级 XMLHttpRequest
+// 成功 / 失败 / 超时 / 取消 全部通过同一套回调通知
+const request = ajaxRequest({
+  url: "${url}",
   method: "${method}",
   headers: {
 ${headerObjStr ? '    ' + headerObjStr : ''}
+  },${method !== 'GET' ? `\n  data: ${reqBody.replace(/\n/g, '\n  ')},` : ''}
+  timeout: ${timeout},
+
+  onLoading: (isLoading) => {
+    console.log('加载状态:', isLoading);
   },
-  signal: controller.signal${method !== 'GET' ? `,\n  body: JSON.stringify(${reqBody.replace(/\n/g, '\n  ')})` : ''}
-};
-
-fetch(url, options)
-  .then(async response => {
-    clearTimeout(id);
-    const contentType = response.headers.get("content-type");
-    const data = contentType && contentType.includes("application/json") 
-       ? await response.json() 
-       : await response.text();
-
-    if (!response.ok) {
-       throw { status: response.status, message: data.error || '服务器错误' };
-    }
-    
-    console.log('请求成功:', data);
-    return data;
-  })
-  .catch(error => {
-    if (error.name === 'AbortError') {
+  onSuccess: ({ data, status, headers }) => {
+    console.log('请求成功:', status, data);
+  },
+  onError: (err) => {
+    // err.type ∈ HTTP_ERROR | NETWORK_ERROR | TIMEOUT | ABORTED
+    if (err.type === 'TIMEOUT') {
       console.error('请求超时');
+    } else if (err.type === 'ABORTED') {
+      console.warn('请求已取消');
     } else {
-      console.error('请求错误:', error);
+      console.error('请求失败:', err.message);
     }
-  });`;
+  }
+});
+
+// 需要中途取消请求时：
+// request.cancel();`;
         setFrontendCode(code);
     }, [method, url, reqBody, headers, timeout]);
 
@@ -148,7 +147,7 @@ fetch(url, options)
             }
         }
 
-        ajaxRequest({
+        requestRef.current = ajaxRequest({
             url,
             method,
             headers: finalHeaders,
@@ -156,20 +155,34 @@ fetch(url, options)
             timeout,
             onLoading: setLoading,
             onSuccess: (resData) => {
-                // resData contains { data, status, headers } from our modified ajax.js
+                // resData: { data, status, headers }
                 setResponseContext(resData);
                 showToast('请求成功', 'success');
             },
             onError: (err) => {
-                // Error object structure depends on utils/ajax.js catch block
+                // 统一错误结构：{ type, message, status, code, details }
                 setResponseContext({
                     error: true,
-                    status: err.code,
+                    status: err.status,
+                    type: err.type,
                     data: err.details || { message: err.message }
                 });
-                showToast(`请求失败: ${err.message}`, 'error');
+                if (err.type === AjaxErrorType.ABORT) {
+                    showToast('请求已取消', 'warning');
+                } else if (err.type === AjaxErrorType.TIMEOUT) {
+                    showToast(`请求超时（${timeout}ms 内未响应）`, 'error');
+                } else {
+                    showToast(`请求失败: ${err.message}`, 'error');
+                }
             }
         });
+    };
+
+    const handleCancel = () => {
+        // 取消同样会走 onError（type = ABORTED），无需额外处理状态
+        if (requestRef.current) {
+            requestRef.current.cancel();
+        }
     };
 
     return (
@@ -290,20 +303,22 @@ fetch(url, options)
                             </div>
                         )}
 
-                        {/* Send Button */}
-                        <button
-                            onClick={handleSend}
-                            disabled={loading}
-                            className="mt-2 w-full py-3 bg-blue-600 hover:bg-blue-500 text-white font-bold rounded-lg flex items-center justify-center gap-2 transition-all shadow-lg shadow-blue-900/20 disabled:opacity-50 disabled:cursor-not-allowed"
-                        >
-                            {loading ? (
-                                <div className="animate-spin rounded-full h-5 w-5 border-2 border-white border-t-transparent"></div>
-                            ) : (
-                                <>
-                                    <Play className="w-5 h-5 fill-current" /> 发送请求
-                                </>
-                            )}
-                        </button>
+                        {/* Send / Cancel Button */}
+                        {loading ? (
+                            <button
+                                onClick={handleCancel}
+                                className="mt-2 w-full py-3 bg-red-600 hover:bg-red-500 text-white font-bold rounded-lg flex items-center justify-center gap-2 transition-all shadow-lg shadow-red-900/20"
+                            >
+                                <XCircle className="w-5 h-5" /> 取消请求
+                            </button>
+                        ) : (
+                            <button
+                                onClick={handleSend}
+                                className="mt-2 w-full py-3 bg-blue-600 hover:bg-blue-500 text-white font-bold rounded-lg flex items-center justify-center gap-2 transition-all shadow-lg shadow-blue-900/20"
+                            >
+                                <Play className="w-5 h-5 fill-current" /> 发送请求
+                            </button>
+                        )}
                     </div>
 
                     <div className="bg-slate-900/50 p-4 rounded-lg border border-slate-800/50 text-xs text-slate-500">
@@ -311,6 +326,7 @@ fetch(url, options)
                         <ul className="list-disc pl-4 space-y-1">
                             <li>点击上方 <b>按钮</b> 快速加载 URL参数、Header 测试场景。</li>
                             <li>在请求体中设置 <code>"data": "error"</code> 可测试 400 错误。</li>
+                            <li>请求发送后可点击 <b>取消请求</b> 测试主动取消（ABORTED）。</li>
                         </ul>
                     </div>
                 </section>
@@ -358,8 +374,13 @@ fetch(url, options)
                                         {/* Status Bar */}
                                         <div className="flex gap-4 items-center bg-slate-950 p-2 rounded border border-slate-800">
                                             <div className={`px-3 py-1 rounded text-xs font-bold ${responseContext.status >= 200 && responseContext.status < 300 ? 'bg-green-900/50 text-green-400 border border-green-800' : 'bg-red-900/50 text-red-400 border border-red-800'}`}>
-                                                状态码: {responseContext.status || 'Unknown'}
+                                                状态码: {responseContext.status || 'N/A'}
                                             </div>
+                                            {responseContext.type && (
+                                                <div className="px-3 py-1 rounded text-xs font-bold bg-yellow-900/40 text-yellow-400 border border-yellow-800">
+                                                    {responseContext.type}
+                                                </div>
+                                            )}
                                             {responseContext.headers && (
                                                 <div className="text-xs text-slate-500">
                                                     大小: {JSON.stringify(responseContext.data).length} 字节
@@ -407,13 +428,14 @@ fetch(url, options)
                                 />
                                 <div className="mt-4 space-y-2">
                                     <p className="text-slate-500 text-sm">
-                                        此健壮实现展示了：
+                                        此跨浏览器封装展示了：
                                     </p>
                                     <ul className="list-disc pl-5 text-sm text-slate-400 space-y-1">
-                                        <li>使用 <code>AbortController</code> 实现 {timeout}ms 超时控制。</li>
-                                        <li>检查 <code>!response.ok</code> 以手动抛出 HTTP 错误（fetch 默认不会抛出）。</li>
-                                        <li>根据 Header 配置动态构建请求头。</li>
-                                        <li>根据响应的 <code>Content-Type</code> 自动解析 JSON 或文本。</li>
+                                        <li>优先使用 <code>fetch</code> + <code>AbortController</code>，不支持时自动降级 <code>XMLHttpRequest</code>。</li>
+                                        <li>成功 / HTTP 错误 / 网络错误 / 超时 / 取消，统一走 <code>onSuccess</code> / <code>onError</code> 回调。</li>
+                                        <li>通过 <code>err.type</code> 区分 HTTP_ERROR、NETWORK_ERROR、TIMEOUT、ABORTED。</li>
+                                        <li>返回句柄的 <code>cancel()</code> 可随时取消请求。</li>
+                                        <li>能力检测基于 <code>typeof</code>，不依赖任何浏览器私有的全局对象。</li>
                                     </ul>
                                 </div>
                             </div>
