@@ -17,6 +17,7 @@ export const AjaxErrorType = {
     TIMEOUT: 'TIMEOUT',        // 超过 timeout 仍未响应
     ABORT: 'ABORTED',          // 调用方主动 cancel()
     PARSE: 'PARSE_ERROR',      // 响应体解析失败
+    SERIALIZE: 'SERIALIZE_ERROR', // 请求体序列化失败（如循环引用、BigInt）
     UNSUPPORTED: 'UNSUPPORTED' // 当前环境既无 fetch 也无 XHR
 };
 
@@ -134,11 +135,14 @@ const startFetchRequest = ({ url, method, headers, body, succeed, fail }) => {
             return;
         }
 
-        // 按 Content-Type 解析响应体
+        // 按 Content-Type 解析响应体。
+        // 先读文本再按需 JSON.parse：204/304 等空响应体即使带 application/json 头，
+        // 也不应判为解析失败（与 XHR 分支的 responseText !== '' 守卫行为一致）。
         let data;
         try {
             const contentType = response.headers.get('content-type');
-            data = isJsonContentType(contentType) ? await response.json() : await response.text();
+            const text = await response.text();
+            data = isJsonContentType(contentType) && text !== '' ? JSON.parse(text) : text;
         } catch (error) {
             fail(createError(AjaxErrorType.PARSE, 'Failed to parse response body.', { status: response.status }));
             return;
@@ -150,8 +154,9 @@ const startFetchRequest = ({ url, method, headers, body, succeed, fail }) => {
             headers: fetchHeadersToObject(response.headers)
         };
 
-        // fetch 不会对 4xx/5xx 抛错，需要手动判断
-        if (response.ok) {
+        // fetch 不会对 4xx/5xx 抛错，需要手动判断；
+        // 304（缓存未修改）与 XHR 分支一致，按成功处理
+        if (response.ok || response.status === 304) {
             succeed(payload);
         } else {
             fail(createError(
@@ -281,13 +286,6 @@ export const ajaxRequest = ({
 } = {}) => {
     const upperMethod = String(method).toUpperCase();
 
-    // 组装最终请求头：对象数据默认补 Content-Type: application/json
-    const { body, json } = serializeBody(data, upperMethod);
-    const finalHeaders = { ...headers };
-    if (json && !hasHeader(finalHeaders, 'Content-Type')) {
-        finalHeaders['Content-Type'] = 'application/json';
-    }
-
     let settled = false;   // 保证成功 / 失败回调全局只触发一次
     let timer = null;
     let abortTransport = noop;
@@ -316,6 +314,27 @@ export const ajaxRequest = ({
     };
 
     onLoading(true);
+
+    // 组装请求体：普通对象会被 JSON 序列化。
+    // 序列化本身可能抛错（循环引用、BigInt 等），这里统一走 onError，
+    // 而不是把同步异常直接抛给调用方。
+    let serialized;
+    try {
+        serialized = serializeBody(data, upperMethod);
+    } catch (error) {
+        fail(createError(
+            AjaxErrorType.SERIALIZE,
+            (error && error.message) || 'Failed to serialize request body.'
+        ));
+        return { cancel: noop };
+    }
+    const { body, json } = serialized;
+
+    // 组装最终请求头：对象数据默认补 Content-Type: application/json
+    const finalHeaders = { ...headers };
+    if (json && !hasHeader(finalHeaders, 'Content-Type')) {
+        finalHeaders['Content-Type'] = 'application/json';
+    }
 
     // 选择引擎：fetch 优先，XHR 兜底
     if (canUseFetch()) {
